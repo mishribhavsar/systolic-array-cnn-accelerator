@@ -9,50 +9,24 @@ avoids a separate pass over memory for each post-processing step.
 > input buffers, "NMU-Out" = post-processing + output buffer).
 
 - **Language / tools:** Verilog-2001, Xilinx Vivado, Icarus Verilog
-- **Vivado project part:** Zynq-7000 XC7Z020 (`xc7z020clg400-1`, PYNQ-Z2); RTL + simulation only
+- **FPGA:** Zynq-7000 XC7Z020 (`xc7z020clg400-1`, PYNQ-Z2), synthesised and implemented in Vivado 2024.2
 - **Verification:** self-checking testbench with a golden reference model.
   26 / 26 tests and 4,892 output checks pass, with 0 errors.
+- **Results:** 56 cycles per 512-MAC tile, 7.2× less buffer traffic than separate
+  post-processing passes, 17% LUT and 6% BRAM on the XC7Z020, 0.184 W.
 
 ---
 
 ## Architecture
 
-```
-            serial_in / serial_out (17 ports)
-                         │
-            ┌────────────▼─────────────┐
-            │ systolic_nmu_top_wrapper │  serial-shift I/O wrapper
-            └────────────┬─────────────┘
-                         │
-┌────────────────────────▼─────────────────────────────────────┐
-│                      systolic_nmu_top                        │
-│                                                              │
-│  config_regs ──▶ controller_fsm (6 states)                   │
-│                        │ addresses / enables                 │
-│  ┌─────────────────────▼────────────────────────┐            │
-│  │ NMU-In: Weight BRAM, Activation BRAM,        │            │
-│  │         zero detection                       │            │
-│  └───────────┬───────────────────┬──────────────┘            │
-│              │ weights           │ activations               │
-│              │            ┌──────▼──────┐                    │
-│              │            │ input skew  │                    │
-│  ┌───────────▼────────────▼─────────────┐   Bias BRAM        │
-│  │ systolic_array_core: 8×8 PEs         │       │            │
-│  │ INT8 × INT8 → 32-bit MAC, zero-skip  │       │            │
-│  └──────────────────┬───────────────────┘       │            │
-│              output_collector (de-skew)         │            │
-│  ┌──────────────────▼───────────────────────────▼─────────┐  │
-│  │ NMU-Out: Bias ▶ ReLU/LeakyReLU ▶ Quantise ▶ 2×2 Pool   │  │
-│  │          ▶ Output BRAM                                 │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-```
+![Architecture](docs/images/architecture.png)
 
 ### Dataflow
 
 1. **Load weights** (8 cycles). The FSM reads the weight BRAM one row at a time
    and shifts each row down into the PE grid. Each PE then holds its weight.
-2. **Load bias** (8 cycles). The bias read pointer is set to `BIAS_BASE_ADDR`.
+   The bias read pointer is set to `BIAS_BASE_ADDR` in the same phase.
+2. **Load bias** (8 cycles). Wait state with no data movement.
 3. **Stream activations** (15 cycles). Activation vectors are read from BRAM and
    skewed diagonally (row *i* is delayed by *i* cycles). They move left to
    right, and partial sums move top to bottom.
@@ -61,6 +35,19 @@ avoids a separate pass over memory for each post-processing step.
    the output BRAM.
 
 One 8×8 × 8×8 tile (512 MACs) takes **56 clock cycles** from start to done.
+
+![Tile timing waveform](docs/images/tile_timing_waveform.png)
+
+*Timing of one tile (Test 3), reconstructed from the per-cycle simulation log.
+Partial sums leave the array along anti-diagonals and the first post-processed
+row is written at cycle 38.*
+
+### Processing element
+
+![Processing element](docs/images/processing_element.png)
+
+Each PE holds one INT8 weight and computes `psum_out = psum_in + w × act_in`.
+When `act_in` is zero the MAC is skipped and `psum_in` passes through unchanged.
 
 ### Fused post-processing pipeline
 
@@ -143,6 +130,8 @@ All reads are synchronous, with 1-cycle latency.
 IDLE → LOAD_WEIGHTS → LOAD_BIAS → LOAD_ACT → COMPUTE → DRAIN → IDLE
 ```
 
+<img src="docs/images/controller_fsm_flowchart.png" alt="Controller FSM flowchart" width="420">
+
 ---
 
 ## Verification
@@ -174,6 +163,52 @@ It also checks PE weight registers, config decoding, single-cycle strobes,
 
 **Result:** 26 / 26 tests passed, 4,892 checks, 0 errors.
 
+![Regression summary](docs/images/regression_26_of_26_pass.png)
+
+### Test results
+
+| Result | Image |
+|---|---|
+| Test 3: identity weights, output must equal the activation matrix | [test03_identity_weights.jpg](docs/images/test03_identity_weights.jpg) |
+| Test 6: random signed data, quantisation shift 0, outputs saturate at −32768 / 32767 | [test06_random_signed_saturation.jpg](docs/images/test06_random_signed_saturation.jpg) |
+| Test 12: ReLU + 2×2 max-pooling, 8×8 → 4×4 | [test12_maxpool_2x2.png](docs/images/test12_maxpool_2x2.png) |
+| Test 13: sparse weights, alternate zero activation rows (zero-skip) | [test13_sparse_zero_skip.jpg](docs/images/test13_sparse_zero_skip.jpg) |
+| Test 14: third back-to-back run, Leaky-ReLU, shift 4, random bias | [test14_leaky_relu_back_to_back.jpg](docs/images/test14_leaky_relu_back_to_back.jpg) |
+
+![Test 3: identity weights](docs/images/test03_identity_weights.jpg)
+
+---
+
+## FPGA implementation (Zynq-7000 XC7Z020)
+
+Synthesised and implemented in Vivado 2024.2 with `systolic_nmu_top_wrapper` as
+top and a 100 MHz clock constraint.
+
+![Vivado utilization](docs/images/vivado_utilization_xc7z020.jpg)
+
+| Resource | Used | Available | Utilisation |
+|---|---|---|---|
+| Slice LUTs | 9,264 | 53,200 | 17.41% |
+| LUT as shift register | 160 | 17,400 | 0.92% |
+| Flip-flops | 6,065 | 106,400 | 5.70% |
+| Block RAM (RAMB36) | 8 | 140 | 5.71% |
+| DSP48E1 | 0 | 220 | 0% |
+| Bonded I/O | 17 | 125 | 13.60% |
+
+![Vivado power report](docs/images/vivado_power_report.jpg)
+
+Total on-chip power is 0.184 W (0.078 W dynamic, 0.106 W static). Block RAM is
+the largest dynamic component at 0.031 W (40%). The estimate is vectorless
+(confidence: Low).
+
+Notes:
+- The 64 multipliers are mapped to LUTs; no DSP slices are used.
+- At 100 MHz the only failing timing paths (WNS −2.56 ns) are output ports,
+  caused by the 2.5 ns output delay in `systolic_nmu.xdc`; internal
+  register-to-register paths meet timing.
+
+---
+
 ### Run with Icarus Verilog
 
 ```bash
@@ -199,6 +234,7 @@ and sets `systolic_nmu_top_wrapper` as the top-level design and
 ├── rtl/                        14 Verilog modules
 ├── tb/tb_systolic_nmu_wrapper.v
 ├── constraints/systolic_nmu.xdc   100 MHz clock + I/O delay constraints
+├── docs/images/                architecture, waveform, test results, Vivado reports
 ├── vivado_create_project.tcl
 └── open_in_vivado.bat
 ```
