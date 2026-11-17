@@ -5,6 +5,16 @@ fused post-processing pipeline that applies bias, activation, quantisation and
 pooling to the array output on its way into the on-chip output buffer. This
 avoids a separate pass over memory for each post-processing step.
 
+<p align="center">
+  <img src="docs/images/vivado_zynq_block_design.png" alt="Zynq block design" width="100%">
+  <br><em>Zynq-7000 block design in Vivado IP Integrator: PS7, AXI DMA, interconnects and the accelerator</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/vivado_floorplan_pblocks.png" alt="Implemented floorplan" width="100%">
+  <br><em>Implemented design on the XC7Z020 with Pblock floorplan (array + input BRAMs, post-processing + output BRAM)</em>
+</p>
+
 > Module names keep the original `nmu` / `near_memory_*` prefixes ("NMU-In" =
 > input buffers, "NMU-Out" = post-processing + output buffer).
 
