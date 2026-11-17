@@ -26,7 +26,15 @@ module config_regs #(
     output wire [3:0]  quantize_shift,  
     output wire [3:0]  leaky_shift,     
     output wire        start_pulse,     
-    output wire [15:0] bias_base_addr   
+    output wire [15:0] bias_base_addr,
+
+    // Performance counter inputs (read-only at addresses 0x09–0x0E)
+    input  wire [31:0] perf_total_cycles,
+    input  wire [31:0] perf_sram_read_count,
+    input  wire [31:0] perf_sram_write_count,
+    input  wire [31:0] perf_compute_active_cycles,
+    input  wire [31:0] perf_stall_cycles,
+    input  wire [31:0] perf_zero_skip_count
 );
 
     reg [31:0] regs [0:15];
@@ -49,16 +57,26 @@ module config_regs #(
             if (cfg_we) begin
                 if (cfg_addr == 0) begin
                     start_pulse_reg <= cfg_wdata[0];
-                end else begin
+                end else if (cfg_addr < 9) begin
+                    // Only addresses 1-8 are writable
                     regs[cfg_addr] <= cfg_wdata;
                 end
+                // Addresses 9-14 are read-only (writes silently ignored)
             end
         end
     end
 
     always @(*) begin
-        if (cfg_raddr == 0) cfg_rdata = {31'b0, start_pulse_reg};
-        else cfg_rdata = regs[cfg_raddr];
+        case (cfg_raddr)
+            4'd0:    cfg_rdata = {31'b0, start_pulse_reg};
+            4'd9:    cfg_rdata = perf_total_cycles;
+            4'd10:   cfg_rdata = perf_sram_read_count;
+            4'd11:   cfg_rdata = perf_sram_write_count;
+            4'd12:   cfg_rdata = perf_compute_active_cycles;
+            4'd13:   cfg_rdata = perf_stall_cycles;
+            4'd14:   cfg_rdata = perf_zero_skip_count;
+            default: cfg_rdata = regs[cfg_raddr];
+        endcase
     end
 
     assign start_pulse     = start_pulse_reg;

@@ -10,10 +10,13 @@ avoids a separate pass over memory for each post-processing step.
 
 - **Language / tools:** Verilog-2001, Xilinx Vivado, Icarus Verilog
 - **FPGA:** Zynq-7000 XC7Z020 (`xc7z020clg400-1`, PYNQ-Z2), synthesised and implemented in Vivado 2024.2
-- **Verification:** self-checking testbench with a golden reference model.
-  26 / 26 tests and 4,892 output checks pass, with 0 errors.
-- **Results:** 56 cycles per 512-MAC tile, 7.2× less buffer traffic than separate
-  post-processing passes, 17% LUT and 6% BRAM on the XC7Z020, 0.184 W.
+- **Verification:** three self-checking testbenches with golden reference models.
+  Core regression: 26 / 26 tests, 4,892 output checks, 0 errors.
+- **Results:** 56 cycles per 512-MAC tile, 1.76× fewer cycles and 64 → 0
+  intermediate SRAM transactions per tile vs. an unfused baseline, 18% LUT and
+  6% BRAM on the XC7Z020, timing met at 100 MHz (WNS +0.898 ns), 0.176 W.
+- **SoC:** AXI4-Lite control + AXI4-Stream data wrapper with an AXI DMA block
+  design for the Zynq PS, and a bare-metal C driver (not yet run on the board).
 
 ---
 
@@ -73,12 +76,14 @@ maps it to Block RAM.
 
 | Memory | Location | Organisation | Contents |
 |---|---|---|---|
-| Weight BRAM | `near_memory_input.v` | 256 × 64 bit | word *k* = 8 INT8 weights of row *k* |
-| Activation BRAM | `near_memory_input.v` | 256 × 64 bit | word *m* = 8 INT8 activations |
+| Weight BRAM (A/B) | `near_memory_input.v` | 2 × 256 × 64 bit | word *k* = 8 INT8 weights of row *k* |
+| Activation BRAM (A/B) | `near_memory_input.v` | 2 × 256 × 64 bit | word *m* = 8 INT8 activations |
 | Bias BRAM | `systolic_nmu_top.v` | 256 × 256 bit | word *m* = 8 × 32-bit biases |
 | Output BRAM | `near_memory_output.v` | 256 × 128 bit | word *m* = 8 × 16-bit results |
 
-All reads are synchronous, with 1-cycle latency.
+All reads are synchronous, with 1-cycle latency. The input memories have A/B
+banks selected by `buffer_swap`; the FSM does not toggle it yet, so loading and
+compute do not overlap in this version.
 
 ---
 
@@ -100,6 +105,10 @@ All reads are synchronous, with 1-cycle latency.
 | `activation_unit` | `rtl/activation_unit.v` | ReLU / Leaky ReLU |
 | `quantizer` | `rtl/quantizer.v` | Shift + saturating 32 → 16-bit quantisation |
 | `pooling_unit` | `rtl/pooling_unit.v` | 2×2 max-pooling, stride 2 |
+| `performance_counters` | `rtl/performance_counters.v` | Six saturating 32-bit counters |
+| `systolic_baseline_top` | `rtl/systolic_baseline_top.v` | Unfused baseline: same core, post-processing in 4 SRAM passes |
+| `baseline_multipass_fsm` | `rtl/baseline_multipass_fsm.v` | 11-state FSM for the baseline passes |
+| `axi_nmu_wrapper` | `rtl/axi_nmu_wrapper.v` | AXI4-Lite slave + AXI4-Stream slave/master, `irq_done` |
 
 ## Parameters
 
@@ -123,6 +132,11 @@ All reads are synchronous, with 1-cycle latency.
 | 6 | `QUANTIZE_SHIFT` | [3:0] | Right-shift before 16-bit saturation |
 | 7 | `LEAKY_SHIFT` | [3:0] | Leaky-ReLU slope = 2^-shift |
 | 8 | `BIAS_BASE_ADDR` | [15:0] | First bias BRAM row for this run |
+| 9 | `PERF_TOTAL_CYCLES` | [31:0] | Cycles with `busy` high (read-only) |
+| 10–11 | `PERF_SRAM_RD/WR` | [31:0] | Intermediate SRAM reads / writes (0 by construction in the fused design) |
+| 12 | `PERF_COMPUTE_CYCLES` | [31:0] | Cycles with `compute_enable` high |
+| 13 | `PERF_STALL_CYCLES` | [31:0] | Stall cycles |
+| 14 | `PERF_ZERO_SKIP` | [31:0] | Compute cycles in which at least one array row gets a zero activation |
 
 ## FSM
 
@@ -177,43 +191,122 @@ It also checks PE weight registers, config decoding, single-cycle strobes,
 
 ![Test 3: identity weights](docs/images/test03_identity_weights.jpg)
 
+### Fused vs. unfused (A/B)
+
+`tb/tb_ab_comparison.v` runs the fused design and the unfused baseline
+(`systolic_baseline_top`) on the same inputs. Both are checked against a golden
+model, and the hardware counters are read out.
+
+| Metric (one 8×8 tile) | Baseline | Fused | |
+|---|---|---|---|
+| Busy cycles | 95 | 54 | 1.76× fewer |
+| Intermediate SRAM reads | 32 | 0 | |
+| Intermediate SRAM writes | 32 | 0 | |
+| Compute-active cycles | 23 | 23 | same core |
+| Output | bit-exact | bit-exact | |
+
+![A/B counter output](docs/images/ab_perf_counters.png)
+
+The baseline writes raw partial sums to an inter-stage SRAM and runs bias,
+activation, quantisation and pooling as four passes of N+2 = 10 cycles each.
+The fused design has no inter-stage SRAM, so its read/write counters are tied
+to 0. (Busy cycles are 54; start to `done` at the pins is 56.)
+
+### AXI wrapper
+
+`tb/tb_axi_nmu.v` configures the core over AXI4-Lite, streams weights,
+activations and biases in over AXI4-Stream (`tuser` = 00 weight, 01 activation,
+10 bias), waits for `irq_done`, and checks every output row, `TLAST`,
+`STATUS.done` and `OUTPUT_COUNT`.
+
 ---
 
 ## FPGA implementation (Zynq-7000 XC7Z020)
 
 Synthesised and implemented in Vivado 2024.2 with `systolic_nmu_top_wrapper` as
-top and a 100 MHz clock constraint.
+top, a 100 MHz clock (200 ps uncertainty) and the Pblock floorplan in
+`constraints/pblock_nmu_colocated.xdc`.
 
-![Vivado utilization](docs/images/vivado_utilization_xc7z020.jpg)
+### Utilisation
 
-| Resource | Used | Available | Utilisation |
-|---|---|---|---|
-| Slice LUTs | 9,264 | 53,200 | 17.41% |
-| LUT as shift register | 160 | 17,400 | 0.92% |
-| Flip-flops | 6,065 | 106,400 | 5.70% |
-| Block RAM (RAMB36) | 8 | 140 | 5.71% |
-| DSP48E1 | 0 | 220 | 0% |
-| Bonded I/O | 17 | 125 | 13.60% |
+![Vivado utilization](docs/images/vivado_utilization.png)
 
-![Vivado power report](docs/images/vivado_power_report.jpg)
+| Resource | Utilisation |
+|---|---|
+| LUT | 18% |
+| LUTRAM | 1% (160 SRL16E in the input skew) |
+| FF | 6% |
+| BRAM | 6% (8 RAMB36) |
+| IO | 14% (17 pins, serial wrapper) |
+| BUFG | 3% (1) |
 
-Total on-chip power is 0.184 W (0.078 W dynamic, 0.106 W static). Block RAM is
-the largest dynamic component at 0.031 W (40%). The estimate is vectorless
-(confidence: Low).
+The 64 multipliers map to LUTs; no DSP48 slices are used.
 
-Notes:
-- The 64 multipliers are mapped to LUTs; no DSP slices are used.
-- At 100 MHz the only failing timing paths (WNS −2.56 ns) are output ports,
-  caused by the 2.5 ns output delay in `systolic_nmu.xdc`; internal
-  register-to-register paths meet timing.
+### Timing
+
+![Vivado timing summary](docs/images/vivado_timing_summary.png)
+
+All constraints met at 100 MHz: WNS +0.898 ns, WHS +0.024 ns, WPWS +4.020 ns,
+0 failing endpoints out of 11,663. `rst_n` and the quasi-static status pins
+(`busy`, `done`, `output_valid`, `output_count`) are false-pathed; the serial
+pins have 1.5 ns max I/O delay and `serial_out` is packed into the IOB.
+
+![Vivado clock tree](docs/images/vivado_clock_tree.png)
+
+`sys_clk` goes IBUF → BUFG and drives 6,112 loads.
+
+### Power
+
+![Vivado power](docs/images/vivado_power.png)
+
+0.176 W total on-chip: 0.069 W dynamic, 0.107 W static. BRAM is the largest
+dynamic component (0.031 W, 44%). The estimate is vectorless (confidence: Low).
+
+### Floorplan
+
+![Pblock floorplan](docs/images/vivado_floorplan_pblocks.png)
+
+`pblock_array_mem` holds the systolic core, input BRAMs and skew registers;
+`pblock_nmu_output` holds the collector, bias BRAM, post-processing pipeline and
+output BRAM, next to it.
+
+---
+
+## Zynq SoC integration (block design)
+
+`vivado_bd/nmu_bd.bd` connects `axi_nmu_wrapper` to the Zynq PS through an AXI
+DMA (MM2S 256-bit, S2MM 128-bit) on HP0, with control on GP0. The C driver in
+`drivers/` configures the registers, starts a run, polls `STATUS` and reads the
+counters. This has been built in IP Integrator and simulated at the wrapper
+level; it has not been run on the board yet.
+
+![Zynq block design](docs/images/vivado_zynq_block_design.png)
+
+![Address editor](docs/images/vivado_address_editor.png)
+
+| Slave | Base | Range |
+|---|---|---|
+| NMU AXI4-Lite | `0x4000_0000` | 4 KB |
+| AXI DMA control | `0x4040_0000` | 64 KB |
+| DDR via HP0 | `0x0000_0000` | 512 MB |
+
+Known gaps: the stock `axi_dma` MM2S port does not drive `tuser`, so the data
+type has to come from a register or sideband instead; `irq_done` is not
+connected to the PS (the driver polls); the driver has no DMA calls yet.
 
 ---
 
 ### Run with Icarus Verilog
 
 ```bash
-iverilog -g2012 -o sim.vvp rtl/*.v tb/tb_systolic_nmu_wrapper.v
+iverilog -g2012 -s tb_systolic_nmu_wrapper -o sim.vvp rtl/*.v tb/tb_systolic_nmu_wrapper.v
 vvp sim.vvp
+
+iverilog -g2012 -s tb_ab_comparison -o ab.vvp rtl/*.v tb/tb_ab_comparison.v
+vvp ab.vvp
+
+iverilog -g2012 -s tb_axi_nmu -o axi.vvp rtl/*.v tb/tb_axi_nmu.v
+vvp axi.vvp
 ```
 
 ### Run with Vivado
@@ -231,10 +324,24 @@ and sets `systolic_nmu_top_wrapper` as the top-level design and
 ## Project structure
 
 ```
-├── rtl/                        14 Verilog modules
-├── tb/tb_systolic_nmu_wrapper.v
-├── constraints/systolic_nmu.xdc   100 MHz clock + I/O delay constraints
-├── docs/images/                architecture, waveform, test results, Vivado reports
+├── rtl/                           18 Verilog modules
+├── tb/                            core regression, A/B comparison, AXI wrapper
+├── constraints/
+│   ├── systolic_nmu.xdc           100 MHz clock, I/O delays, false paths
+│   └── pblock_nmu_colocated.xdc   Pblock floorplan
+├── drivers/                       bare-metal C driver (ARM Cortex-A9)
+├── vivado_bd/                     Zynq block design (nmu_bd) and IP configs
+├── experimental/                  dual-tile and baseline AXI wrapper (not working yet)
+├── docs/images/                   diagrams, waveform, test results, Vivado reports
 ├── vivado_create_project.tcl
 └── open_in_vivado.bat
 ```
+
+## Experimental
+
+`experimental/dual_tile/` has two 4×4 tiles sharing one post-processing
+pipeline through a round-robin arbiter. It is not functional yet: both tiles
+start on the same pulse and drain in the same cycles, and with no per-tile
+buffer the arbiter can only take one of them. `tb_dual_tile.v` is a smoke test
+with no golden check. `experimental/axi_nmu_baseline_wrapper.v` is an AXI
+wrapper for the baseline and has no testbench yet.

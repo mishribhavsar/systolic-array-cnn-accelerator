@@ -49,9 +49,6 @@ module systolic_nmu_top_wrapper #(
     output wire [ADDR_WIDTH-1:0] output_count
 );
 
-    // =========================================================================
-    // Frame widths
-    // =========================================================================
     localparam INPUT_SHIFT_BITS  = 1 + CFG_ADDR_WIDTH + 32 + CFG_ADDR_WIDTH
                                  + ADDR_WIDTH + ARRAY_SIZE*DATA_WIDTH + 1 + 1
                                  + ADDR_WIDTH + ARRAY_SIZE*ACC_WIDTH + 1
@@ -79,9 +76,7 @@ module systolic_nmu_top_wrapper #(
     wire [31:0]                             core_cfg_rdata;
     wire [ARRAY_SIZE*OUTPUT_WIDTH-1:0]      core_out_rdata;
 
-    // =========================================================================
-    // Input shift register + latch
-    // =========================================================================
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             input_shift_reg    <= {INPUT_SHIFT_BITS{1'b0}};
@@ -125,9 +120,7 @@ module systolic_nmu_top_wrapper #(
         end
     end
 
-    // =========================================================================
-    // Output shift register
-    // =========================================================================
+  
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             output_shift_reg <= {OUTPUT_SHIFT_BITS{1'b0}};
@@ -139,9 +132,6 @@ module systolic_nmu_top_wrapper #(
 
     assign serial_out = output_shift_reg[OUTPUT_SHIFT_BITS-1];
 
-    // =========================================================================
-    // Core
-    // =========================================================================
     systolic_nmu_top #(
         .ARRAY_SIZE     (ARRAY_SIZE),
         .DATA_WIDTH     (DATA_WIDTH),
@@ -170,7 +160,14 @@ module systolic_nmu_top_wrapper #(
         .busy           (busy),
         .done           (done),
         .output_valid   (output_valid),
-        .output_count   (output_count)
+        .output_count   (output_count),
+        // Performance counters — readable via cfg_rdata at addrs 0x09-0x0E
+        .perf_total_cycles          (),
+        .perf_sram_read_count       (),
+        .perf_sram_write_count      (),
+        .perf_compute_active_cycles (),
+        .perf_stall_cycles          (),
+        .perf_zero_skip_count       ()
     );
 
 endmodule

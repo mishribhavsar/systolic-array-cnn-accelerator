@@ -12,6 +12,8 @@
 // Note:        Bias read uses the *next* address so that bias_data_reg always
 //              matches bias_sram[bias_raddr_reg]; the pointer is reloaded during
 //              the weight-load phase, before the first result row arrives.
+//              performance_counters: total, compute-active and zero-skip
+//              cycles. Intermediate SRAM counts are tied to 0 (no such SRAM).
 // =============================================================================
 module systolic_nmu_top #(
     parameter ARRAY_SIZE    = 8,
@@ -41,7 +43,15 @@ module systolic_nmu_top #(
     output wire                                     busy,
     output wire                                     done,
     output wire                                     output_valid,
-    output wire [ADDR_WIDTH-1:0]                    output_count
+    output wire [ADDR_WIDTH-1:0]                    output_count,
+
+    // --- Performance Counters (for A/B comparison telemetry) ---
+    output wire [31:0]                              perf_total_cycles,
+    output wire [31:0]                              perf_sram_read_count,
+    output wire [31:0]                              perf_sram_write_count,
+    output wire [31:0]                              perf_compute_active_cycles,
+    output wire [31:0]                              perf_stall_cycles,
+    output wire [31:0]                              perf_zero_skip_count
 );
     wire [15:0] matrix_m_size, matrix_k_size, matrix_n_size;
     wire [1:0]  activation_mode;
@@ -86,7 +96,13 @@ module systolic_nmu_top #(
         .matrix_n_size(matrix_n_size), .activation_mode(activation_mode),
         .pooling_enable(pooling_enable), .quantize_shift(quantize_shift),
         .leaky_shift(leaky_shift), .start_pulse(start_pulse),
-        .bias_base_addr(bias_base_addr)
+        .bias_base_addr(bias_base_addr),
+        .perf_total_cycles(perf_total_cycles),
+        .perf_sram_read_count(perf_sram_read_count),
+        .perf_sram_write_count(perf_sram_write_count),
+        .perf_compute_active_cycles(perf_compute_active_cycles),
+        .perf_stall_cycles(perf_stall_cycles),
+        .perf_zero_skip_count(perf_zero_skip_count)
     );
 
     controller_fsm #(.ARRAY_SIZE(ARRAY_SIZE), .ADDR_WIDTH(ADDR_WIDTH)) u_controller_fsm (
@@ -166,9 +182,6 @@ module systolic_nmu_top #(
         .result_valid(collector_result_valid)
     );
 
-    // =========================================================================
-    // 7. Bias SRAM (Block RAM, next-address read for row alignment)
-    // =========================================================================
     integer bi;
     initial for (bi = 0; bi < SRAM_DEPTH; bi = bi + 1) bias_sram[bi] = {(ARRAY_SIZE*ACC_WIDTH){1'b0}};
 
@@ -200,5 +213,23 @@ module systolic_nmu_top #(
         .pooling_enable(pooling_enable), .post_proc_enable(fsm_post_proc_enable),
         .out_raddr(out_raddr), .out_rdata(out_rdata),
         .output_valid(output_valid), .output_count(output_count)
+    );
+
+
+    performance_counters u_perf_counters (
+        .clk(clk), .rst_n(rst_n),
+        .clear(start_pulse),
+        .counting_enable(busy),
+        .sram_read_event(1'b0),          // NMU: no intermediate SRAM reads
+        .sram_write_event(1'b0),         // NMU: no intermediate SRAM writes
+        .compute_active(fsm_compute_enable),
+        .stall_event(1'b0),
+        .zero_skip_event(|core_zero_flags & fsm_compute_enable),
+        .total_cycles(perf_total_cycles),
+        .sram_read_count(perf_sram_read_count),
+        .sram_write_count(perf_sram_write_count),
+        .compute_active_cycles(perf_compute_active_cycles),
+        .stall_cycles(perf_stall_cycles),
+        .zero_skip_count(perf_zero_skip_count)
     );
 endmodule

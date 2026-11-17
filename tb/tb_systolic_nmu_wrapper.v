@@ -1,44 +1,576 @@
+// `timescale 1ns / 1ps
+
+
+
+// module tb_systolic_nmu;
+
+//     parameter ARRAY_SIZE     = 8;
+//     parameter DATA_WIDTH     = 8;
+//     parameter ACC_WIDTH      = 32;
+//     parameter OUTPUT_WIDTH   = 16;
+//     parameter SRAM_DEPTH     = 256;
+//     parameter ADDR_WIDTH     = 8;
+//     parameter CFG_ADDR_WIDTH = 4;
+
+//     parameter CLK_PERIOD     = 10; // 100 MHz
+
+//     // Config register addresses
+//     localparam CFG_START           = 4'd0;
+//     localparam CFG_MATRIX_M        = 4'd1;
+//     localparam CFG_MATRIX_K        = 4'd2;
+//     localparam CFG_MATRIX_N        = 4'd3;
+//     localparam CFG_ACTIVATION_MODE = 4'd4;
+//     localparam CFG_POOLING_ENABLE  = 4'd5;
+//     localparam CFG_QUANTIZE_SHIFT  = 4'd6;
+//     localparam CFG_LEAKY_SHIFT     = 4'd7;
+//     localparam CFG_BIAS_BASE_ADDR  = 4'd8;
+
+//     reg                                     clk;
+//     reg                                     rst_n;
+
+//     reg                                     cfg_we;
+//     reg  [CFG_ADDR_WIDTH-1:0]               cfg_addr;
+//     reg  [31:0]                             cfg_wdata;
+//     reg  [CFG_ADDR_WIDTH-1:0]               cfg_raddr;
+//     wire [31:0]                             cfg_rdata;
+
+//     reg  [ADDR_WIDTH-1:0]                   ext_waddr;
+//     reg  [ARRAY_SIZE*DATA_WIDTH-1:0]        ext_wdata;
+//     reg                                     ext_weight_we;
+//     reg                                     ext_act_we;
+
+//     reg  [ADDR_WIDTH-1:0]                   bias_waddr;
+//     reg  signed [ARRAY_SIZE*ACC_WIDTH-1:0]  bias_wdata;
+//     reg                                     bias_we;
+
+//     reg  [ADDR_WIDTH-1:0]                   out_raddr;
+//     wire [ARRAY_SIZE*OUTPUT_WIDTH-1:0]      out_rdata;
+
+//     wire                                    busy;
+//     wire                                    done;
+//     wire                                    output_valid;
+//     wire [ADDR_WIDTH-1:0]                   output_count;
+
+
+//     integer total_tests;
+//     integer passed_tests;
+//     integer failed_tests;
+//     integer timeout_cnt;
+//     localparam TIMEOUT_LIMIT = 5000; // cycles
+
+//     // Golden model storage
+//     reg signed [ACC_WIDTH-1:0]    golden_C [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+//     reg signed [ACC_WIDTH-1:0]    golden_bias [0:ARRAY_SIZE-1];
+//     reg signed [ACC_WIDTH-1:0]    golden_post [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+//     reg signed [OUTPUT_WIDTH-1:0] golden_quant [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+
+//     // Test matrices
+//     reg signed [DATA_WIDTH-1:0] mat_W [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+//     reg signed [DATA_WIDTH-1:0] mat_A [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+
+//     systolic_nmu_top #(
+//         .ARRAY_SIZE     (ARRAY_SIZE),
+//         .DATA_WIDTH     (DATA_WIDTH),
+//         .ACC_WIDTH      (ACC_WIDTH),
+//         .OUTPUT_WIDTH   (OUTPUT_WIDTH),
+//         .SRAM_DEPTH     (SRAM_DEPTH),
+//         .ADDR_WIDTH     (ADDR_WIDTH),
+//         .CFG_ADDR_WIDTH (CFG_ADDR_WIDTH)
+//     ) dut (
+//         .clk            (clk),
+//         .rst_n          (rst_n),
+//         .cfg_we         (cfg_we),
+//         .cfg_addr       (cfg_addr),
+//         .cfg_wdata      (cfg_wdata),
+//         .cfg_raddr      (cfg_raddr),
+//         .cfg_rdata      (cfg_rdata),
+//         .ext_waddr      (ext_waddr),
+//         .ext_wdata      (ext_wdata),
+//         .ext_weight_we  (ext_weight_we),
+//         .ext_act_we     (ext_act_we),
+//         .bias_waddr     (bias_waddr),
+//         .bias_wdata     (bias_wdata),
+//         .bias_we        (bias_we),
+//         .out_raddr      (out_raddr),
+//         .out_rdata      (out_rdata),
+//         .busy           (busy),
+//         .done           (done),
+//         .output_valid   (output_valid),
+//         .output_count   (output_count)
+//     );
+
+//     initial clk = 0;
+//     always #(CLK_PERIOD/2) clk = ~clk;
+
+//     initial begin
+//         $dumpfile("systolic_nmu.vcd");
+//         $dumpvars(0, tb_systolic_nmu);
+//     end
+
+
+//     task write_config;
+//         input [CFG_ADDR_WIDTH-1:0] addr;
+//         input [31:0] data;
+//         begin
+//             @(posedge clk);
+//             cfg_we    <= 1'b1;
+//             cfg_addr  <= addr;
+//             cfg_wdata <= data;
+//             @(posedge clk);
+//             cfg_we    <= 1'b0;
+//         end
+//     endtask
+
+//     task load_weight_row;
+//         input [ADDR_WIDTH-1:0] addr;
+//         input [ARRAY_SIZE*DATA_WIDTH-1:0] data;
+//         begin
+//             @(posedge clk);
+//             ext_waddr     <= addr;
+//             ext_wdata     <= data;
+//             ext_weight_we <= 1'b1;
+//             @(posedge clk);
+//             ext_weight_we <= 1'b0;
+//         end
+//     endtask
+
+//     task load_act_row;
+//         input [ADDR_WIDTH-1:0] addr;
+//         input [ARRAY_SIZE*DATA_WIDTH-1:0] data;
+//         begin
+//             @(posedge clk);
+//             ext_waddr  <= addr;
+//             ext_wdata  <= data;
+//             ext_act_we <= 1'b1;
+//             @(posedge clk);
+//             ext_act_we <= 1'b0;
+//         end
+//     endtask
+
+//     task load_act_matrix;
+//         integer c;
+//         reg [ARRAY_SIZE*DATA_WIDTH-1:0] packed_col;
+//         begin
+//             for (c = 0; c < ARRAY_SIZE; c = c + 1) begin
+//                 packed_col = {
+//                     mat_A[7][c], mat_A[6][c], mat_A[5][c], mat_A[4][c],
+//                     mat_A[3][c], mat_A[2][c], mat_A[1][c], mat_A[0][c]
+//                 };
+//                 load_act_row(c, packed_col);
+//             end
+//         end
+//     endtask
+
+//     task load_bias_row;
+//         input [ADDR_WIDTH-1:0] addr;
+//         input [ARRAY_SIZE*ACC_WIDTH-1:0] data;
+//         begin
+//             @(posedge clk);
+//             bias_waddr <= addr;
+//             bias_wdata <= data;
+//             bias_we    <= 1'b1;
+//             @(posedge clk);
+//             bias_we    <= 1'b0;
+//         end
+//     endtask
+
+//     task wait_for_done;
+//         begin
+//             timeout_cnt = 0;
+//             while (!done && timeout_cnt < TIMEOUT_LIMIT) begin
+//                 @(posedge clk);
+//                 timeout_cnt = timeout_cnt + 1;
+//             end
+//             if (timeout_cnt >= TIMEOUT_LIMIT) begin
+//                 $display("[ERROR] Timeout waiting for done signal after %0d cycles!", TIMEOUT_LIMIT);
+//             end
+//         end
+//     endtask
+
+//     task reset_dut;
+//         begin
+//             rst_n         <= 1'b0;
+//             cfg_we        <= 1'b0;
+//             cfg_addr      <= 0;
+//             cfg_wdata     <= 0;
+//             cfg_raddr     <= 0;
+//             ext_waddr     <= 0;
+//             ext_wdata     <= 0;
+//             ext_weight_we <= 1'b0;
+//             ext_act_we    <= 1'b0;
+//             bias_waddr    <= 0;
+//             bias_wdata    <= 0;
+//             bias_we       <= 1'b0;
+//             out_raddr     <= 0;
+//             repeat(5) @(posedge clk);
+//             rst_n         <= 1'b1;
+//             repeat(2) @(posedge clk);
+//         end
+//     endtask
+
+//     // Pack a row of 8-bit values into a flat vector
+//     function [ARRAY_SIZE*DATA_WIDTH-1:0] pack_row_8;
+//         input signed [DATA_WIDTH-1:0] r0, r1, r2, r3, r4, r5, r6, r7;
+//         begin
+//             pack_row_8 = {r7, r6, r5, r4, r3, r2, r1, r0};
+//         end
+//     endfunction
+
+//     task compute_golden_matmul;
+//         integer r, c, k;
+//         reg signed [ACC_WIDTH-1:0] sum;
+//         begin
+//             for (r = 0; r < ARRAY_SIZE; r = r + 1) begin
+//                 for (c = 0; c < ARRAY_SIZE; c = c + 1) begin
+//                     sum = 0;
+//                     for (k = 0; k < ARRAY_SIZE; k = k + 1) begin
+//                         sum = sum + mat_W[r][k] * mat_A[k][c];
+//                     end
+//                     golden_C[r][c] = sum;
+//                 end
+//             end
+//         end
+//     endtask
+
+//     // Apply post-processing: bias + activation + quantize
+//     task compute_golden_post;
+//         input [1:0]  act_mode;
+//         input [3:0]  quant_shift;
+//         input [3:0]  leak_shift;
+//         integer r, c;
+//         reg signed [ACC_WIDTH-1:0] val;
+//         reg signed [ACC_WIDTH-1:0] shifted;
+//         localparam signed [ACC_WIDTH-1:0] QMAX =  (1 << (OUTPUT_WIDTH-1)) - 1;
+//         localparam signed [ACC_WIDTH-1:0] QMIN = -(1 << (OUTPUT_WIDTH-1));
+//         begin
+//             for (r = 0; r < ARRAY_SIZE; r = r + 1) begin
+//                 for (c = 0; c < ARRAY_SIZE; c = c + 1) begin
+//                     // Bias addition
+//                     val = golden_C[r][c] + golden_bias[c];
+
+//                     // Activation
+//                     case (act_mode)
+//                         2'd1: begin // ReLU
+//                             if (val < 0) val = 0;
+//                         end
+//                         2'd2: begin // Leaky ReLU
+//                             if (val < 0) val = val >>> leak_shift;
+//                         end
+//                         default: ; // pass-through
+//                     endcase
+
+//                     golden_post[r][c] = val;
+
+//                     // Quantize
+//                     shifted = val >>> quant_shift;
+//                     if (shifted > QMAX)
+//                         golden_quant[r][c] = QMAX[OUTPUT_WIDTH-1:0];
+//                     else if (shifted < QMIN)
+//                         golden_quant[r][c] = QMIN[OUTPUT_WIDTH-1:0];
+//                     else
+//                         golden_quant[r][c] = shifted[OUTPUT_WIDTH-1:0];
+//                 end
+//             end
+//         end
+//     endtask
+
+//     integer i, j;
+//     reg signed [OUTPUT_WIDTH-1:0] hw_val;
+//     reg signed [OUTPUT_WIDTH-1:0] exp_val;
+
+//     initial begin
+//         $display("  Systolic Array NMU — Self-Checking Testbench");
+//         $display("  Array Size: %0d x %0d", ARRAY_SIZE, ARRAY_SIZE);
+//         $display("  Data Width: %0d-bit, Acc Width: %0d-bit, Out Width: %0d-bit",
+//                  DATA_WIDTH, ACC_WIDTH, OUTPUT_WIDTH);
+
+//         total_tests  = 0;
+//         passed_tests = 0;
+//         failed_tests = 0;
+
+
+//         $display("\n TEST 1: Identity Matrix Multiplication");
+
+//         reset_dut;
+
+//         // Set up identity weight matrix
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1)
+//                 mat_W[i][j] = (i == j) ? 8'sd1 : 8'sd0;
+
+//         // Set up sequential activation matrix (1..64)
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1)
+//                 mat_A[i][j] = (i * ARRAY_SIZE + j + 1);
+
+//         // Zero bias
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             golden_bias[i] = 0;
+
+//         // Load weights into SRAM (row by row)
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_weight_row(i, {mat_W[i][7], mat_W[i][6], mat_W[i][5], mat_W[i][4],
+//                                 mat_W[i][3], mat_W[i][2], mat_W[i][1], mat_W[i][0]});
+//         end
+
+//         // Load activations into SRAM (column-wise)
+//         load_act_matrix;
+
+//         // Load zero bias
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_bias_row(i, {ARRAY_SIZE*ACC_WIDTH{1'b0}});
+//         end
+
+//         // Configure: no activation, no pooling, no quantize shift
+//         write_config(CFG_MATRIX_M,        32'd8);
+//         write_config(CFG_MATRIX_K,        32'd8);
+//         write_config(CFG_MATRIX_N,        32'd8);
+//         write_config(CFG_ACTIVATION_MODE, 32'd0);
+//         write_config(CFG_POOLING_ENABLE,  32'd0);
+//         write_config(CFG_QUANTIZE_SHIFT,  32'd0);
+//         write_config(CFG_LEAKY_SHIFT,     32'd3);
+//         write_config(CFG_BIAS_BASE_ADDR,  32'd0);
+
+//         // Compute golden reference
+//         compute_golden_matmul;
+//         compute_golden_post(2'd0, 4'd0, 4'd3);
+
+//         // Start computation
+//         $display("  Starting computation...");
+//         write_config(CFG_START, 32'd1);
+
+//         // Wait for completion
+//         wait_for_done;
+
+//         if (done) begin
+//             $display("  Computation done. Reading outputs...");
+//             repeat(10) @(posedge clk);
+
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1) begin
+//                 out_raddr <= j;
+//                 @(posedge clk);
+//                 @(posedge clk);
+
+//                 for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//                     hw_val  = out_rdata[(i*OUTPUT_WIDTH) +: OUTPUT_WIDTH];
+//                     exp_val = golden_quant[i][j];
+//                     total_tests = total_tests + 1;
+
+//                     if (hw_val === exp_val) begin
+//                         passed_tests = passed_tests + 1;
+//                     end else begin
+//                         failed_tests = failed_tests + 1;
+//                         $display("  [FAIL] C[%0d][%0d]: expected=%0d, got=%0d",
+//                                  i, j, exp_val, hw_val);
+//                     end
+//                 end
+//             end
+//             if (failed_tests == 0)
+//                 $display("  [PASS] Test 1: Identity multiplication verified.");
+//             else
+//                 $display("  [INFO] Test 1: %0d mismatches found.", failed_tests);
+//         end
+
+//         $display("\nTEST 2: Known Matrix Multiply + Bias + ReLU ");
+
+//         reset_dut;
+
+//         // Small known weight matrix
+//         mat_W[0][0]=8'sd2;  mat_W[0][1]=8'sd1;  mat_W[0][2]=8'sd0;  mat_W[0][3]=8'sd3;
+//         mat_W[0][4]=8'sd0;  mat_W[0][5]=8'sd0;  mat_W[0][6]=8'sd1;  mat_W[0][7]=8'sd0;
+//         mat_W[1][0]=8'sd0;  mat_W[1][1]=8'sd2;  mat_W[1][2]=8'sd1;  mat_W[1][3]=8'sd0;
+//         mat_W[1][4]=8'sd1;  mat_W[1][5]=8'sd0;  mat_W[1][6]=8'sd0;  mat_W[1][7]=8'sd1;
+//         mat_W[2][0]=8'sd1;  mat_W[2][1]=8'sd0;  mat_W[2][2]=8'sd2;  mat_W[2][3]=8'sd0;
+//         mat_W[2][4]=8'sd0;  mat_W[2][5]=8'sd1;  mat_W[2][6]=8'sd0;  mat_W[2][7]=8'sd0;
+//         mat_W[3][0]=8'sd0;  mat_W[3][1]=8'sd1;  mat_W[3][2]=8'sd0;  mat_W[3][3]=8'sd2;
+//         mat_W[3][4]=8'sd0;  mat_W[3][5]=8'sd0;  mat_W[3][6]=8'sd0;  mat_W[3][7]=8'sd1;
+//         mat_W[4][0]=8'sd1;  mat_W[4][1]=8'sd0;  mat_W[4][2]=8'sd1;  mat_W[4][3]=8'sd0;
+//         mat_W[4][4]=8'sd2;  mat_W[4][5]=8'sd0;  mat_W[4][6]=8'sd1;  mat_W[4][7]=8'sd0;
+//         mat_W[5][0]=8'sd0;  mat_W[5][1]=8'sd1;  mat_W[5][2]=8'sd0;  mat_W[5][3]=8'sd1;
+//         mat_W[5][4]=8'sd0;  mat_W[5][5]=8'sd2;  mat_W[5][6]=8'sd0;  mat_W[5][7]=8'sd1;
+//         mat_W[6][0]=8'sd1;  mat_W[6][1]=8'sd1;  mat_W[6][2]=8'sd0;  mat_W[6][3]=8'sd0;
+//         mat_W[6][4]=8'sd1;  mat_W[6][5]=8'sd0;  mat_W[6][6]=8'sd2;  mat_W[6][7]=8'sd0;
+//         mat_W[7][0]=8'sd0;  mat_W[7][1]=8'sd0;  mat_W[7][2]=8'sd1;  mat_W[7][3]=8'sd1;
+//         mat_W[7][4]=8'sd0;  mat_W[7][5]=8'sd1;  mat_W[7][6]=8'sd0;  mat_W[7][7]=8'sd2;
+
+//         // Activation matrix with some negative values
+//         mat_A[0][0]=8'sd5;  mat_A[0][1]=8'sd3;  mat_A[0][2]=-8'sd2; mat_A[0][3]=8'sd4;
+//         mat_A[0][4]=8'sd1;  mat_A[0][5]=8'sd0;  mat_A[0][6]=8'sd2;  mat_A[0][7]=-8'sd1;
+//         mat_A[1][0]=8'sd1;  mat_A[1][1]=8'sd4;  mat_A[1][2]=8'sd3;  mat_A[1][3]=-8'sd1;
+//         mat_A[1][4]=8'sd2;  mat_A[1][5]=8'sd1;  mat_A[1][6]=8'sd0;  mat_A[1][7]=8'sd3;
+//         mat_A[2][0]=-8'sd3; mat_A[2][1]=8'sd2;  mat_A[2][2]=8'sd5;  mat_A[2][3]=8'sd1;
+//         mat_A[2][4]=8'sd0;  mat_A[2][5]=8'sd3;  mat_A[2][6]=8'sd1;  mat_A[2][7]=8'sd0;
+//         mat_A[3][0]=8'sd4;  mat_A[3][1]=-8'sd1; mat_A[3][2]=8'sd0;  mat_A[3][3]=8'sd6;
+//         mat_A[3][4]=8'sd3;  mat_A[3][5]=8'sd0;  mat_A[3][6]=-8'sd2; mat_A[3][7]=8'sd2;
+//         mat_A[4][0]=8'sd2;  mat_A[4][1]=8'sd1;  mat_A[4][2]=-8'sd1; mat_A[4][3]=8'sd0;
+//         mat_A[4][4]=8'sd4;  mat_A[4][5]=8'sd2;  mat_A[4][6]=8'sd1;  mat_A[4][7]=8'sd0;
+//         mat_A[5][0]=8'sd0;  mat_A[5][1]=8'sd3;  mat_A[5][2]=8'sd2;  mat_A[5][3]=-8'sd2;
+//         mat_A[5][4]=8'sd1;  mat_A[5][5]=8'sd5;  mat_A[5][6]=8'sd0;  mat_A[5][7]=8'sd1;
+//         mat_A[6][0]=8'sd1;  mat_A[6][1]=8'sd0;  mat_A[6][2]=8'sd4;  mat_A[6][3]=8'sd1;
+//         mat_A[6][4]=8'sd0;  mat_A[6][5]=8'sd0;  mat_A[6][6]=8'sd3;  mat_A[6][7]=-8'sd1;
+//         mat_A[7][0]=-8'sd1; mat_A[7][1]=8'sd2;  mat_A[7][2]=8'sd0;  mat_A[7][3]=8'sd3;
+//         mat_A[7][4]=8'sd2;  mat_A[7][5]=8'sd1;  mat_A[7][6]=-8'sd1; mat_A[7][7]=8'sd4;
+
+//         // Non-zero bias (per column)
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             golden_bias[i] = i + 1; // bias = {1, 2, 3, 4, 5, 6, 7, 8}
+
+//         // Load weights
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_weight_row(i, {mat_W[i][7], mat_W[i][6], mat_W[i][5], mat_W[i][4],
+//                                 mat_W[i][3], mat_W[i][2], mat_W[i][1], mat_W[i][0]});
+//         end
+
+//         // Load activations (column-wise)
+//         load_act_matrix;
+
+//         // Load bias (pack 8x 32-bit values per row)
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_bias_row(i, {
+//                 golden_bias[7], golden_bias[6], golden_bias[5], golden_bias[4],
+//                 golden_bias[3], golden_bias[2], golden_bias[1], golden_bias[0]
+//             });
+//         end
+
+//         // Configure: ReLU, quantize_shift=4, no pooling
+//         write_config(CFG_MATRIX_M,        32'd8);
+//         write_config(CFG_MATRIX_K,        32'd8);
+//         write_config(CFG_MATRIX_N,        32'd8);
+//         write_config(CFG_ACTIVATION_MODE, 32'd1); // ReLU
+//         write_config(CFG_POOLING_ENABLE,  32'd0);
+//         write_config(CFG_QUANTIZE_SHIFT,  32'd4);
+//         write_config(CFG_LEAKY_SHIFT,     32'd3);
+//         write_config(CFG_BIAS_BASE_ADDR,  32'd0);
+
+//         // Compute golden reference
+//         compute_golden_matmul;
+//         compute_golden_post(2'd1, 4'd4, 4'd3);
+
+//         $display("  Golden model computed. Starting hardware...");
+//         write_config(CFG_START, 32'd1);
+//         wait_for_done;
+
+//         if (done) begin
+//             $display("  Computation done. Verifying outputs...");
+//             repeat(10) @(posedge clk);
+
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1) begin
+//                 out_raddr <= j;
+//                 @(posedge clk);
+//                 @(posedge clk);
+
+//                 for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//                     hw_val  = out_rdata[(i*OUTPUT_WIDTH) +: OUTPUT_WIDTH];
+//                     exp_val = golden_quant[i][j];
+//                     total_tests = total_tests + 1;
+
+//                     if (hw_val === exp_val) begin
+//                         passed_tests = passed_tests + 1;
+//                     end else begin
+//                         failed_tests = failed_tests + 1;
+//                         $display("  [FAIL] C[%0d][%0d]: expected=%0d, got=%0d (golden_C=%0d)",
+//                                  i, j, exp_val, hw_val, golden_C[i][j]);
+//                     end
+//                 end
+//             end
+//         end
+
+
+//         $display("\n TEST 3: Zero Matrix — Zero-Skip Verification ");
+
+//         reset_dut;
+
+//         // All-zero activation matrix
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1)
+//                 mat_A[i][j] = 8'sd0;
+
+//         // Zero bias
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1)
+//             golden_bias[i] = 0;
+
+//         // Load weights
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_weight_row(i, {mat_W[i][7], mat_W[i][6], mat_W[i][5], mat_W[i][4],
+//                                 mat_W[i][3], mat_W[i][2], mat_W[i][1], mat_W[i][0]});
+//         end
+
+//         // Load zero activations
+//         load_act_matrix;
+
+//         // Load zero bias
+//         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//             load_bias_row(i, {ARRAY_SIZE*ACC_WIDTH{1'b0}});
+//         end
+
+//         // Configure: no activation, no pooling, no shift
+//         write_config(CFG_MATRIX_M,        32'd8);
+//         write_config(CFG_MATRIX_K,        32'd8);
+//         write_config(CFG_MATRIX_N,        32'd8);
+//         write_config(CFG_ACTIVATION_MODE, 32'd0);
+//         write_config(CFG_POOLING_ENABLE,  32'd0);
+//         write_config(CFG_QUANTIZE_SHIFT,  32'd0);
+//         write_config(CFG_LEAKY_SHIFT,     32'd3);
+//         write_config(CFG_BIAS_BASE_ADDR,  32'd0);
+
+//         // Golden: all zeros
+//         compute_golden_matmul;
+//         compute_golden_post(2'd0, 4'd0, 4'd3);
+
+//         $display("  Starting computation (all-zero activations)...");
+//         write_config(CFG_START, 32'd1);
+//         wait_for_done;
+
+//         if (done) begin
+//             $display("  Computation done. Verifying all outputs are zero...");
+//             repeat(10) @(posedge clk);
+
+//             for (j = 0; j < ARRAY_SIZE; j = j + 1) begin
+//                 out_raddr <= j;
+//                 @(posedge clk);
+//                 @(posedge clk);
+
+//                 for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+//                     hw_val = out_rdata[(i*OUTPUT_WIDTH) +: OUTPUT_WIDTH];
+//                     total_tests = total_tests + 1;
+
+//                     if (hw_val === 16'sd0) begin
+//                         passed_tests = passed_tests + 1;
+//                     end else begin
+//                         failed_tests = failed_tests + 1;
+//                         $display("  [FAIL] C[%0d][%0d]: expected=0, got=%0d", i, j, hw_val);
+//                     end
+//                 end
+//             end
+//         end
+
+
+//         $display("  TEST SUMMARY");
+//         $display("  Total tests:  %0d", total_tests);
+//         $display("  Passed:       %0d", passed_tests);
+//         $display("  Failed:       %0d", failed_tests);
+
+
+//         if (failed_tests == 0)
+//             $display("  ALL TESTS PASSED ");
+//         else
+//             $display("  %0d TESTS FAILED", failed_tests);
+
+
+//         #100;
+//         $finish;
+//     end
+
+
+// endmodule
+
+
+
 `timescale 1ns / 1ps
 
-// =============================================================================
-// Testbench:  tb_systolic_nmu_wrapper
-// DUT:        systolic_nmu_top_wrapper -> systolic_nmu_top (full NMU pipeline)
-// Checks:     - end-to-end self-check against a behavioural reference:
-//               out[m][j] = pool( sat( act( sum_k A[m][k]*W[k][j] + B[m][j] ) >>> qshift ) )
-//             - PE weight registers after the FSM weight-load phase
-//             - config decode (verifies serial frame packing + CFG_* map)
-//             - write strobes are single-cycle, done is single-cycle,
-//               exactly one start per run, no ghost restarts
-//             - output_valid count and output_count at done
-//             - logs cycles to console and to nmu_log.csv
-//
-// LOG CONVENTION (same as tb_systolic_array_core):
-//   "cycle k" = state AFTER the k-th rising edge. Inputs change 1 ns after a
-//   rising edge, sampling is 1 ns after the rising edge -> no races.
-//   Serial-shift cycles are left out of the CSV unless LOG_SERIAL = 1.
-//
-// DATA LAYOUT (what the checker assumes)
-//   weight SRAM word k : lane j = W[k][j]      (array row k)
-//   act    SRAM word m : lane k = A[m][k]      (activation vector m)
-//   act    SRAM words N..2N-1 = 0              (FSM reads addr 0..2N-2)
-//   bias   SRAM word bias_base+m : lane j = B[m][j]
-//   out    SRAM word m : lane j = out[m][j]
-//
-// ASSUMPTIONS ON MODULES NOT PROVIDED (edit if your RTL differs)
-//   - config_regs map: CFG_* localparams below; start = write 1 to CFG_CTRL bit 0
-//   - activation_unit: 0 = bypass, 1 = ReLU, 2 = leaky (x<0 : x >>> leaky_shift)
-//   - pooling_unit   : POOL_MODE = 1 (default): 2x2 max-pool. Rows (2r, 2r+1)
-//                      x lanes (2p, 2p+1) -> SRAM word r, lane p; N/2 writes.
-//                      (matches output_valid on every 2nd row in the RTL log)
-//                      POOL_MODE = 0: 2:1 max over adjacent lanes, N writes.
-//   Set TEST_POOLING = 0 if the pooling semantics differ.
-// =============================================================================
 
 module tb_systolic_nmu_wrapper;
 
-    // -------------------------------------------------------------------------
-    // Parameters
-    // -------------------------------------------------------------------------
     parameter ARRAY_SIZE     = 8;
     parameter DATA_WIDTH     = 8;
     parameter ACC_WIDTH      = 32;
@@ -51,7 +583,6 @@ module tb_systolic_nmu_wrapper;
     parameter VERBOSE_RANDOM = 0;    // console verbosity during random loop
     parameter LOG_SERIAL     = 0;    // 1 = CSV also holds every serial shift cycle (large)
     parameter TEST_POOLING   = 1;
-    parameter POOL_MODE      = 1;    // 1 = 2x2 max-pool, 0 = 2:1 lane pool
     parameter CHECK_CFG_READ = 1;    // check cfg_rdata readback of CFG_M
     parameter RUN_TIMEOUT    = 4000; // max cycles from start to done
     parameter CLK_PERIOD     = 10;
@@ -85,9 +616,7 @@ module tb_systolic_nmu_wrapper;
     localparam signed [AW-1:0] QMAX =  (1 << (OW-1)) - 1;
     localparam signed [AW-1:0] QMIN = -(1 << (OW-1));
 
-    // -------------------------------------------------------------------------
-    // DUT signals
-    // -------------------------------------------------------------------------
+  
     reg           clk;
     reg           rst_n;
     reg           serial_in;
@@ -120,15 +649,10 @@ module tb_systolic_nmu_wrapper;
         .output_count   (output_count)
     );
 
-    // -------------------------------------------------------------------------
-    // Clock
-    // -------------------------------------------------------------------------
+  
     initial clk = 1'b0;
     always #(CLK_PERIOD/2) clk = ~clk;
 
-    // -------------------------------------------------------------------------
-    // Debug taps (hierarchical)
-    // -------------------------------------------------------------------------
     wire [2:0]  fsm_state  = dut.u_core.u_controller_fsm.state;
     wire        start_pulse= dut.u_core.start_pulse;
     wire        coll_valid = dut.u_core.collector_result_valid;
@@ -157,9 +681,6 @@ module tb_systolic_nmu_wrapper;
         end
     endgenerate
 
-    // -------------------------------------------------------------------------
-    // Test data
-    // -------------------------------------------------------------------------
     reg signed [DW-1:0] W_mat   [0:N-1][0:N-1];   // W[k][j]
     reg signed [DW-1:0] A_mat   [0:N-1][0:N-1];   // A[m][k]
     reg signed [AW-1:0] B_mat   [0:N-1][0:N-1];   // bias[m][j]
@@ -179,22 +700,15 @@ module tb_systolic_nmu_wrapper;
     reg [AD-1:0] sh_out_raddr;
     reg [OUT_BITS-1:0] rx_frame;
 
-    // -------------------------------------------------------------------------
-    // Bookkeeping
-    // -------------------------------------------------------------------------
     integer       cycle_cnt, test_id;
     integer       err_cnt, chk_cnt, pass_tests, fail_tests, err_at_start;
     integer       seed, fd;
     integer       start_cnt, run_cycles;
-    integer       exp_rows;        // output SRAM rows expected for this run
     reg           busy_seen;
     reg [8*3-1:0] phase;   // RST IDL SHF LAT WRD LOD SHO RUN
     reg           verbose;
     reg           prev_cfg_we, prev_wwe, prev_awe, prev_bwe, prev_done;
 
-    // =========================================================================
-    // Logging
-    // =========================================================================
     function [8*4-1:0] st_name;
         input [2:0] s;
         case (s)
@@ -277,9 +791,7 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Basic control
-    // =========================================================================
+    
     task apply_reset;
         begin
             phase           = "RST";
@@ -341,9 +853,6 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Serial frame layer
-    // =========================================================================
     function [IN_BITS-1:0] make_frame;
         input            f_cfg_we;
         input [CW-1:0]   f_cfg_addr;
@@ -472,10 +981,7 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Data generation
-    // =========================================================================
-    // mode: 0=const(val) 1=identity 2=random 3=counting(k*N+j+1) 4=sparse random
+
     task fill_W;
         input integer mode;
         input integer val;
@@ -541,12 +1047,10 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Reference model: bias -> activation -> quantize(sat) -> pool
-    // =========================================================================
     task compute_expected;
         integer mi, j, k;
         reg signed [AW-1:0] s, v;
+        reg signed [OW-1:0] m0, m1;
         begin
             for (mi = 0; mi < N; mi = mi + 1)
                 for (j = 0; j < N; j = j + 1) begin
@@ -564,40 +1068,26 @@ module tb_systolic_nmu_wrapper;
                     else if (v < QMIN) Q_mat[mi][j] = QMIN[OW-1:0];
                     else               Q_mat[mi][j] = v[OW-1:0];
                 end
-            exp_rows = (c_pool && POOL_MODE == 1) ? N/2 : N;
             for (mi = 0; mi < N; mi = mi + 1)
                 for (j = 0; j < N; j = j + 1) begin
-                    if (!c_pool) begin
-                        EXP_mat[mi][j] = Q_mat[mi][j];
-                    end else if (j >= N/2) begin
-                        EXP_mat[mi][j] = 0;
-                    end else if (POOL_MODE == 1) begin
-                        if (mi < N/2)
-                            EXP_mat[mi][j] = max4(Q_mat[2*mi][2*j],   Q_mat[2*mi][2*j+1],
-                                                  Q_mat[2*mi+1][2*j], Q_mat[2*mi+1][2*j+1]);
-                        else
+                    if (c_pool) begin
+                        if ((mi < N/2) && (j < N/2)) begin
+                            m0 = (Q_mat[2*mi][2*j] > Q_mat[2*mi][2*j+1]) ?
+                                 Q_mat[2*mi][2*j] : Q_mat[2*mi][2*j+1];
+                            m1 = (Q_mat[2*mi+1][2*j] > Q_mat[2*mi+1][2*j+1]) ?
+                                 Q_mat[2*mi+1][2*j] : Q_mat[2*mi+1][2*j+1];
+                            EXP_mat[mi][j] = (m0 > m1) ? m0 : m1;
+                        end else begin
                             EXP_mat[mi][j] = 0;
+                        end
                     end else begin
-                        EXP_mat[mi][j] = (Q_mat[mi][2*j] > Q_mat[mi][2*j+1]) ?
-                                         Q_mat[mi][2*j] : Q_mat[mi][2*j+1];
+                        EXP_mat[mi][j] = Q_mat[mi][j];
                     end
                 end
         end
     endtask
 
-    function signed [OW-1:0] max4;
-        input signed [OW-1:0] a, b, c, d;
-        reg   signed [OW-1:0] x, y;
-        begin
-            x = (a > b) ? a : b;
-            y = (c > d) ? c : d;
-            max4 = (x > y) ? x : y;
-        end
-    endfunction
 
-    // =========================================================================
-    // Checks
-    // =========================================================================
     task check_cfg_decode;
         begin
             chk_cnt = chk_cnt + 1;
@@ -666,9 +1156,6 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Run phases
-    // =========================================================================
     task program_tile;
         integer i;
         begin
@@ -720,13 +1207,13 @@ module tb_systolic_nmu_wrapper;
                 err_cnt = err_cnt + 1;
                 $display("ERROR [T%0d]: FSM never reached LOAD_ACT", test_id);
             end
-            if (ov_cnt != exp_rows) begin
+            if (ov_cnt != (c_pool ? (N/2) : N)) begin
                 err_cnt = err_cnt + 1;
-                $display("ERROR [T%0d]: output_valid pulses = %0d, expected %0d", test_id, ov_cnt, exp_rows);
+                $display("ERROR [T%0d]: output_valid pulses = %0d, expected %0d", test_id, ov_cnt, (c_pool ? (N/2) : N));
             end
-            if (got_cnt != exp_rows) begin
+            if (got_cnt != (c_pool ? (N/2) : N)) begin
                 err_cnt = err_cnt + 1;
-                $display("ERROR [T%0d]: output_count at done = %0d, expected %0d", test_id, got_cnt, exp_rows);
+                $display("ERROR [T%0d]: output_count at done = %0d, expected %0d", test_id, got_cnt, (c_pool ? (N/2) : N));
             end
 
             idle(4);
@@ -734,8 +1221,7 @@ module tb_systolic_nmu_wrapper;
             chk_cnt = chk_cnt + 1;
             if (start_cnt != 1) begin
                 err_cnt = err_cnt + 1;
-                $display("ERROR [T%0d]: start_pulse high for %0d cycles (expected a 1-cycle pulse) -> core restarts after done",
-                         test_id, start_cnt);
+                $display("ERROR [T%0d]: start_pulse fired %0d times (expected 1)", test_id, start_cnt);
             end
             if (verbose) $display("    run: %0d cycles start->done, %0d output rows", run_cycles, ov_cnt);
         end
@@ -744,7 +1230,9 @@ module tb_systolic_nmu_wrapper;
     task read_results;
         integer mi, j;
         reg [31:0] crd;
+        integer exp_rows;
         begin
+            exp_rows = c_pool ? (N/2) : N;
             for (mi = 0; mi < exp_rows; mi = mi + 1) begin
                 read_frame(mi, CFG_M);
                 crd = rx_frame[OUT_BITS-1 -: 32];
@@ -793,7 +1281,7 @@ module tb_systolic_nmu_wrapper;
                     $display("");
                 end
                 $display("    Expected out[m][j]   |   DUT out[m][j]:");
-                for (i = 0; i < exp_rows; i = i + 1) begin
+                for (i = 0; i < N; i = i + 1) begin
                     $write("      ");
                     for (j = 0; j < N; j = j + 1) $write("%7d", EXP_mat[i][j]);
                     $write("   |");
@@ -816,16 +1304,13 @@ module tb_systolic_nmu_wrapper;
         end
     endtask
 
-    // =========================================================================
-    // Main test sequence
-    // =========================================================================
     integer it, kk, bb;
     reg [N*AW-1:0] garbage;
 
     initial begin
         cycle_cnt = 0; test_id = 0; err_cnt = 0; chk_cnt = 0;
         pass_tests = 0; fail_tests = 0; err_at_start = 0;
-        start_cnt = 0; run_cycles = 0; busy_seen = 0; exp_rows = N;
+        start_cnt = 0; run_cycles = 0; busy_seen = 0;
         prev_cfg_we = 0; prev_wwe = 0; prev_awe = 0; prev_bwe = 0; prev_done = 0;
         seed = 32'h1234_ABCD;
         verbose = VERBOSE;
@@ -838,14 +1323,11 @@ module tb_systolic_nmu_wrapper;
         fd = $fopen("nmu_log.csv", "w");
         write_csv_header;
 
-        $display("=====================================================");
+    
         $display(" NMU wrapper TB : N=%0d DW=%0d AW=%0d OW=%0d", N, DW, AW, OW);
         $display(" input frame = %0d bits, output frame = %0d bits", IN_BITS, OUT_BITS);
-        $display("=====================================================");
 
-        // ---------------------------------------------------------------
-        // T1: reset state
-        // ---------------------------------------------------------------
+
         test_start(1, 1);
         $display("TEST 1: reset clears FSM, status pins, PE weights, serial_out");
         check_idle_state;
@@ -859,9 +1341,7 @@ module tb_systolic_nmu_wrapper;
         check_idle_state;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T2: serial interface, config decode, single-cycle strobes, no ghost start
-        // ---------------------------------------------------------------
+       
         test_start(2, 1);
         $display("TEST 2: serial config path, strobe width, no restart without start");
         set_cfg(2, 5, 3, 1, 17);
@@ -890,9 +1370,7 @@ module tb_systolic_nmu_wrapper;
         end
         test_end;
 
-        // ---------------------------------------------------------------
-        // T3: identity weights, bypass post-processing -> out == A
-        // ---------------------------------------------------------------
+   
         test_start(3, 1);
         $display("TEST 3: identity weights, no bias/act/shift/pool, out must equal A");
         set_cfg(0, 0, 0, 0, 0);
@@ -900,9 +1378,6 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T4: all ones -> every output == N
-        // ---------------------------------------------------------------
         test_start(4, 1);
         $display("TEST 4: all-ones weights and activations, every output = N");
         set_cfg(0, 0, 0, 0, 0);
@@ -910,9 +1385,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T5: counting pattern
-        // ---------------------------------------------------------------
+
         test_start(5, 1);
         $display("TEST 5: counting-pattern weights and activations (qshift=2)");
         set_cfg(0, 2, 0, 0, 0);
@@ -920,9 +1393,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T6: random signed, with and without saturation
-        // ---------------------------------------------------------------
+     
         test_start(6, 1);
         $display("TEST 6a: random signed, qshift=0 (saturation active)");
         set_cfg(0, 0, 0, 0, 0);
@@ -934,9 +1405,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T7: extreme values
-        // ---------------------------------------------------------------
+        
         test_start(7, 1);
         $display("TEST 7: extreme values (min*min, max*max, min*max) with/without saturation");
         fill_B(0, 0);
@@ -948,9 +1417,7 @@ module tb_systolic_nmu_wrapper;
         fill_W(0, -(1 << (DW-1)));   fill_A(0, -(1 << (DW-1)));   run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T8: bias (row-distinct pattern exposes bias/row misalignment)
-        // ---------------------------------------------------------------
+
         test_start(8, 1);
         $display("TEST 8a: identity W, bias = m*1000 + j (bias/row alignment)");
         set_cfg(0, 0, 0, 0, 0);
@@ -962,9 +1429,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T9: ReLU
-        // ---------------------------------------------------------------
+        
         test_start(9, 1);
         $display("TEST 9: ReLU (mode 1)");
         set_cfg(1, 3, 0, 0, 0);
@@ -972,9 +1437,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T10: leaky ReLU
-        // ---------------------------------------------------------------
+  
         test_start(10, 1);
         $display("TEST 10: leaky ReLU (mode 2), leaky_shift = 2 and 5");
         set_cfg(2, 3, 2, 0, 0);
@@ -984,9 +1447,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T11: quantize shift sweep
-        // ---------------------------------------------------------------
+        
         test_start(11, 1);
         $display("TEST 11: quantize shift sweep 0,1,8,15");
         fill_W(2, 0); fill_A(1, 0); fill_B(1, 0);
@@ -996,21 +1457,16 @@ module tb_systolic_nmu_wrapper;
         set_cfg(0, 15, 0, 0, 0); run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T12: pooling
-        // ---------------------------------------------------------------
         if (TEST_POOLING) begin
             test_start(12, 1);
-            $display("TEST 12: pooling enabled (POOL_MODE=%0d)", POOL_MODE);
+            $display("TEST 12: pooling enabled (2:1 lane max-pool assumption)");
             set_cfg(1, 2, 0, 1, 0);
             fill_W(2, 0); fill_A(1, 0); fill_B(1, 0);
             run_tile;
             test_end;
         end
 
-        // ---------------------------------------------------------------
-        // T13: sparse / zero data
-        // ---------------------------------------------------------------
+      
         test_start(13, 1);
         $display("TEST 13a: sparse activations with dense weights");
         set_cfg(0, 2, 0, 0, 0);
@@ -1027,9 +1483,7 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T14: back-to-back runs without reset (stale state, counter reset)
-        // ---------------------------------------------------------------
+
         test_start(14, 1);
         $display("TEST 14: three runs back-to-back without reset");
         set_cfg(0, 3, 0, 0, 0); fill_W(2, 0); fill_A(1, 0); fill_B(1, 0); run_tile;
@@ -1037,9 +1491,7 @@ module tb_systolic_nmu_wrapper;
         set_cfg(2, 4, 1, 0, 0); fill_W(3, 0); fill_A(1, 0); fill_B(1, 0); run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T15: non-zero bias_base with guard rows around the bias window
-        // ---------------------------------------------------------------
+        
         test_start(15, 1);
         bb = (SRAM_DEPTH > N + 40) ? 37 : 1;
         $display("TEST 15: bias_base = %0d, garbage in rows base-1 and base+N", bb);
@@ -1051,9 +1503,6 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T16: reset during computation, then recovery
-        // ---------------------------------------------------------------
         test_start(16, 1);
         $display("TEST 16: reset asserted in COMPUTE, then full recovery run");
         set_cfg(0, 0, 0, 0, 0);
@@ -1085,9 +1534,6 @@ module tb_systolic_nmu_wrapper;
         run_tile;
         test_end;
 
-        // ---------------------------------------------------------------
-        // T100+: random regression
-        // ---------------------------------------------------------------
         $display("RANDOM REGRESSION: %0d iterations", NUM_RANDOM);
         verbose = VERBOSE_RANDOM;
         for (it = 0; it < NUM_RANDOM; it = it + 1) begin
@@ -1105,10 +1551,7 @@ module tb_systolic_nmu_wrapper;
         end
         verbose = VERBOSE;
 
-        // ---------------------------------------------------------------
-        // Summary
-        // ---------------------------------------------------------------
-        $display("=====================================================");
+
         $display(" SUMMARY");
         $display("   Tests passed : %0d / %0d", pass_tests, pass_tests + fail_tests);
         $display("   Checks       : %0d", chk_cnt);
@@ -1117,7 +1560,7 @@ module tb_systolic_nmu_wrapper;
         if (err_cnt == 0) $display("   *** ALL TESTS PASSED ***");
         else              $display("   *** TEST FAILED ***");
         $display("   Per-cycle log: nmu_log.csv");
-        $display("=====================================================");
+ 
         $fclose(fd);
         $finish;
     end

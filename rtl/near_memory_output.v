@@ -37,9 +37,6 @@ module near_memory_output #(
     output wire [ADDR_WIDTH-1:0]                        output_count
 );
 
-    // -------------------------------------------------------------------------
-    // Signals
-    // -------------------------------------------------------------------------
     wire                                        bias_valid_out;
     wire signed [ARRAY_SIZE*ACC_WIDTH-1:0]      bias_data_out;
     
@@ -53,9 +50,7 @@ module near_memory_output #(
     wire signed [(ARRAY_SIZE/2)*OUTPUT_WIDTH-1:0] pool_data_out;
     wire signed [ARRAY_SIZE*OUTPUT_WIDTH-1:0]   pool_bypass_out;
     
-    // -------------------------------------------------------------------------
-    // Pipeline Instantiations
-    // -------------------------------------------------------------------------
+
     
     bias_adder #(
         .ARRAY_SIZE(ARRAY_SIZE),
@@ -113,10 +108,7 @@ module near_memory_output #(
         .data_bypass_flat (pool_bypass_out)
     );
 
-    // -------------------------------------------------------------------------
-    // Output SRAM Selection & Write Logic
-    // -------------------------------------------------------------------------
-    
+   
     wire sram_wen;
     wire [ARRAY_SIZE*OUTPUT_WIDTH-1:0] sram_wdata;
     
@@ -141,10 +133,7 @@ module near_memory_output #(
     assign output_count = waddr_cnt;
     assign output_valid = sram_wen;
 
-    // -------------------------------------------------------------------------
-    // SRAM Bank Inference (Xilinx Block RAM)
-    // -------------------------------------------------------------------------
-    
+
     (* ram_style = "block" *) 
     reg [ARRAY_SIZE*OUTPUT_WIDTH-1:0] out_sram [0:SRAM_DEPTH-1];
     reg [ARRAY_SIZE*OUTPUT_WIDTH-1:0] sram_rdata_reg;

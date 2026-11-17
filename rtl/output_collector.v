@@ -28,13 +28,7 @@ module output_collector #(
         end
     endgenerate
 
-    // Delay chains for de-skewing
-    // Delay for column j = ARRAY_SIZE - 1 - j
-    
-    // We'll declare a 3D array of registers for the delay chain
-    // delay_chain[col][stage]
-    // To handle Verilog limitations with variable sized genvars, 
-    // we define the max possible stages for each col.
+
     
     genvar j, k;
     generate
